@@ -1,5 +1,6 @@
 plugins {
     kotlin("jvm")
+    id("kotlin-kapt")
     id("java-gradle-plugin")
     id("com.gradle.plugin-publish")
 }
@@ -9,10 +10,14 @@ dependencies {
     implementation(gradleApi())
     implementation("com.android.tools.build:gradle:${BuildPluginsVersion.ANDROID_PLUGIN}")
     implementation("com.google.firebase:firebase-appdistribution-gradle:${BuildPluginsVersion.APP_DISTRIBUTION_PLUGIN}")
+    implementation("com.squareup.okhttp3:okhttp:${BuildPluginsVersion.OK_HTTP}")
+    implementation("com.squareup.moshi:moshi:${BuildPluginsVersion.MOSHI}")
 
     testImplementation(TestingLib.JUNIT)
     testImplementation("com.android.tools.build:gradle:${BuildPluginsVersion.ANDROID_PLUGIN}")
     testImplementation("com.google.firebase:firebase-appdistribution-gradle:${BuildPluginsVersion.APP_DISTRIBUTION_PLUGIN}")
+
+    kapt("com.squareup.moshi:moshi-kotlin-codegen:${BuildPluginsVersion.MOSHI}")
 }
 
 java {

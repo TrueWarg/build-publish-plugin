@@ -21,8 +21,8 @@ import ru.kode.android.build.publish.plugin.command.getCommandExecutor
 import ru.kode.android.build.publish.plugin.enity.BuildVariant
 import ru.kode.android.build.publish.plugin.git.GitRepository
 import ru.kode.android.build.publish.plugin.task.GenerateChangelogTask
-import ru.kode.android.build.publish.plugin.task.GetLastTagTask
 import ru.kode.android.build.publish.plugin.task.PrintLastIncreasedTag
+import ru.kode.android.build.publish.plugin.task.AppCenterDistributionTask
 import ru.kode.android.build.publish.plugin.task.SendChangelogTask
 import ru.kode.android.build.publish.plugin.util.capitalized
 import java.io.File
@@ -33,6 +33,7 @@ internal const val PRINT_LAST_INCREASED_TAG_TASK_PREFIX = "printLastIncreasedTag
 internal const val GET_LAST_TAG_TASK_PREFIX = "getLastTag"
 internal const val BUILD_PUBLISH_TASK_PREFIX = "processBuildPublish"
 internal const val DISTRIBUTION_UPLOAD_TASK_PREFIX = "appDistributionUpload"
+internal const val APP_CENTER_DISTRIBUTION_UPLOAD_TASK_PREFIX = "appCenterDistributionUpload"
 
 internal object AgpVersions {
     val CURRENT: VersionNumber = VersionNumber.parse(ANDROID_GRADLE_PLUGIN_VERSION).baseVersion
@@ -197,6 +198,28 @@ abstract class BuildPublishPlugin : Plugin<Project> {
             it.slackConfig.set(buildPublishExtension.slackConfig)
             it.tgUserMentions.set(buildPublishExtension.tgUserMentions)
             it.tgConfig.set(buildPublishExtension.tgConfig)
+        }
+    }
+
+    private fun TaskContainer.registerAppCenterDistributionTask(
+        buildVariant: String,
+        buildVariants: Set<String>,
+        buildPublishExtension: BuildPublishExtension,
+        project: Project,
+    ) {
+        register(
+            "$APP_CENTER_DISTRIBUTION_UPLOAD_TASK_PREFIX${buildVariant.capitalize()}",
+            AppCenterDistributionTask::class.java,
+        ) {
+            val commandExecutor = LinuxShellCommandExecutor(project)
+            val commitMessageKey = buildPublishExtension.commitMessageKey.get()
+            val releaseNotes = buildChangelog(project, commandExecutor, commitMessageKey, buildVariants)
+            it.config.set(buildPublishExtension.appCenterConfig)
+            it.baseOutputFileName.set(buildPublishExtension.baseOutputFileName)
+            it.currentBuildVariant.set(buildVariant)
+            it.buildVariants.set(buildVariants)
+            it.distributionGroups.set(buildPublishExtension.appCenterDistributionGroups)
+            it.releaseNotes.set(releaseNotes)
         }
     }
 }
