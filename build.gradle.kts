@@ -8,6 +8,7 @@ plugins {
     id("com.github.ben-manes.versions") version BuildPluginsVersion.VERSIONS_PLUGIN
     id("com.android.application") version BuildPluginsVersion.ANDROID_PLUGIN apply false
     id("com.google.firebase.appdistribution") version BuildPluginsVersion.APP_DISTRIBUTION_PLUGIN apply false
+    id("org.jetbrains.kotlin.android") version "1.6.20" apply false
 }
 
 allprojects {

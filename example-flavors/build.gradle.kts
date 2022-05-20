@@ -2,6 +2,7 @@ plugins {
     id("com.android.application")
     id("com.google.firebase.appdistribution")
     id("ru.kode.android.build-publish")
+    id("org.jetbrains.kotlin.android")
 }
 
 android {
@@ -9,7 +10,7 @@ android {
 
     defaultConfig {
         applicationId = "com.example.flavors.android"
-        minSdk = 31
+        minSdk = 21
         targetSdk = 31
         versionCode = 1
         versionName = "1.0"
@@ -26,6 +27,11 @@ android {
             dimension = "default"
         }
     }
+}
+dependencies {
+    implementation("androidx.core:core-ktx:1.7.0")
+    implementation("androidx.appcompat:appcompat:1.3.0")
+    implementation("com.google.android.material:material:1.4.0")
 }
 
 buildPublish {
