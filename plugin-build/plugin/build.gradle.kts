@@ -11,7 +11,10 @@ dependencies {
     implementation("com.android.tools.build:gradle:${BuildPluginsVersion.ANDROID_PLUGIN}")
     implementation("com.google.firebase:firebase-appdistribution-gradle:${BuildPluginsVersion.APP_DISTRIBUTION_PLUGIN}")
     implementation("com.squareup.okhttp3:okhttp:${BuildPluginsVersion.OK_HTTP}")
+    implementation("com.squareup.okhttp3:logging-interceptor:${BuildPluginsVersion.OK_HTTP}")
     implementation("com.squareup.moshi:moshi:${BuildPluginsVersion.MOSHI}")
+    implementation("com.squareup.retrofit2:retrofit:${BuildPluginsVersion.RETROFIT}")
+    implementation("com.squareup.retrofit2:converter-moshi:${BuildPluginsVersion.RETROFIT}")
 
     testImplementation(TestingLib.JUNIT)
     testImplementation("com.android.tools.build:gradle:${BuildPluginsVersion.ANDROID_PLUGIN}")

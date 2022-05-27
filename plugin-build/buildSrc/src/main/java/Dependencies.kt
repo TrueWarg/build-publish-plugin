@@ -12,6 +12,7 @@ object BuildPluginsVersion {
     const val ANDROID_PLUGIN = "7.0.4"
     const val OK_HTTP = "4.9.3"
     const val MOSHI = "1.13.0"
+    const val RETROFIT = "2.9.0"
 }
 
 object TestingLib {

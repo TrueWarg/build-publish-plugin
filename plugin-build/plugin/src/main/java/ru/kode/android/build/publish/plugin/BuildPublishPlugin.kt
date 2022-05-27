@@ -4,9 +4,9 @@ package ru.kode.android.build.publish.plugin
 
 import com.android.build.api.variant.ApplicationAndroidComponentsExtension
 import com.android.build.api.variant.impl.VariantOutputImpl
-import com.android.build.api.variant.impl.dirName
 import com.android.build.gradle.AppExtension
 import com.android.build.gradle.AppPlugin
+import com.android.build.gradle.internal.api.ApkVariantOutputImpl
 import com.android.builder.model.Version.ANDROID_GRADLE_PLUGIN_VERSION
 import com.google.firebase.appdistribution.gradle.AppDistributionExtension
 import com.google.firebase.appdistribution.gradle.AppDistributionPlugin
@@ -16,23 +16,23 @@ import org.gradle.api.file.RegularFile
 import org.gradle.api.provider.Provider
 import org.gradle.api.tasks.StopExecutionException
 import org.gradle.api.tasks.TaskContainer
+import org.gradle.api.tasks.TaskProvider
 import org.gradle.util.internal.VersionNumber
 import ru.kode.android.build.publish.plugin.command.getCommandExecutor
 import ru.kode.android.build.publish.plugin.enity.BuildVariant
 import ru.kode.android.build.publish.plugin.git.GitRepository
-import ru.kode.android.build.publish.plugin.task.GenerateChangelogTask
-import ru.kode.android.build.publish.plugin.task.PrintLastIncreasedTag
 import ru.kode.android.build.publish.plugin.task.AppCenterDistributionTask
+import ru.kode.android.build.publish.plugin.task.GenerateChangelogTask
+import ru.kode.android.build.publish.plugin.task.GetLastTagTask
+import ru.kode.android.build.publish.plugin.task.PrintLastIncreasedTag
 import ru.kode.android.build.publish.plugin.task.SendChangelogTask
-import ru.kode.android.build.publish.plugin.util.capitalized
+import ru.kode.android.build.publish.plugin.util.capitalizedName
 import java.io.File
 
 internal const val SEND_CHANGELOG_TASK_PREFIX = "sendChangelog"
 internal const val GENERATE_CHANGELOG_TASK_PREFIX = "generateChangelog"
 internal const val PRINT_LAST_INCREASED_TAG_TASK_PREFIX = "printLastIncreasedTag"
 internal const val GET_LAST_TAG_TASK_PREFIX = "getLastTag"
-internal const val BUILD_PUBLISH_TASK_PREFIX = "processBuildPublish"
-internal const val DISTRIBUTION_UPLOAD_TASK_PREFIX = "appDistributionUpload"
 internal const val APP_CENTER_DISTRIBUTION_UPLOAD_TASK_PREFIX = "appCenterDistributionUpload"
 
 internal object AgpVersions {
@@ -54,10 +54,8 @@ abstract class BuildPublishPlugin : Plugin<Project> {
             callback = { variant ->
                 val output = variant.outputs
                     .find { it is VariantOutputImpl && it.fullName == variant.name }
+                    as? VariantOutputImpl
                 if (output != null) {
-                    val buildVariant = BuildVariant(variant.name, File(output.dirName()))
-                    project.registerVariantTasks(buildPublishExtension, buildVariant, changelogFile)
-                    println("override output for variant $${variant.name}")
                     val commandExecutor = getCommandExecutor(project)
                     val repository = GitRepository(commandExecutor, setOf(variant.name))
                     val recentBuildTag = repository.findRecentBuildTag()
@@ -68,8 +66,28 @@ abstract class BuildPublishPlugin : Plugin<Project> {
                 }
             }
         )
-        androidExtension.finalizeDsl {
+
+        androidExtension.finalizeDsl { ext ->
             project.configurePlugins(buildPublishExtension, changelogFile)
+            if (ext is AppExtension) {
+                ext.applicationVariants.all { variant ->
+                    val output = variant.outputs
+                        .find { it is ApkVariantOutputImpl } as? ApkVariantOutputImpl
+                    if (output != null) {
+                        println("override output for variant $${variant.name}")
+                        project.registerVariantTasks(
+                            buildPublishExtension = buildPublishExtension,
+                            buildVariant = BuildVariant(
+                                name = variant.name,
+                                flavorName = variant.flavorName,
+                                buildTypeName = variant.buildType.name,
+                            ),
+                            outputFile = output.outputFile,
+                            changelogFile = changelogFile,
+                        )
+                    }
+                }
+            }
         }
     }
 
@@ -77,6 +95,7 @@ abstract class BuildPublishPlugin : Plugin<Project> {
         buildPublishExtension: BuildPublishExtension,
         buildVariant: BuildVariant,
         changelogFile: File,
+        outputFile: File,
     ) {
         tasks.apply {
             val getLastTagTaskProvider = registerGetLastTagTask(buildVariant)
@@ -90,37 +109,42 @@ abstract class BuildPublishPlugin : Plugin<Project> {
                 changelogFile,
                 getLastTagTaskProvider.flatMap { it.tagBuildFile }
             )
+            registerAppCenterDistributionTask(
+                buildPublishExtension,
+                buildVariant,
+                generateChangelogTaskProvider.flatMap { it.changelogFile },
+                outputFile,
+            )
             registerSendChangelogTask(
                 buildPublishExtension,
                 buildVariant,
                 generateChangelogTaskProvider.flatMap { it.changelogFile },
                 getLastTagTaskProvider.flatMap { it.tagBuildFile }
             )
-            registerAppDistributionPublishTask(buildVariant)
         }
     }
 
     private fun Project.registerGetLastTagTask(
         buildVariant: BuildVariant,
     ): Provider<GetLastTagTask> {
-        val capitalizedBuildVariant = buildVariant.capitalized()
+        val capitalizedBuildVariant = buildVariant.capitalizedName()
         return tasks.register(
             "$GET_LAST_TAG_TASK_PREFIX$capitalizedBuildVariant",
             GetLastTagTask::class.java
         ) { task ->
             val tagBuildFile = project.layout.buildDirectory
-                .file("tag-build-${buildVariant.name}.json")
+                .file("tag-build-${buildVariant.capitalizedName()}.json")
             task.tagBuildFile.set(tagBuildFile)
-            task.buildVariant.set(buildVariant.name)
+            task.buildVariant.set(buildVariant.capitalizedName())
         }
     }
 
-    private fun Project.registerPrintLastIncreasedTagTask(
+    private fun TaskContainer.registerPrintLastIncreasedTagTask(
         buildVariant: BuildVariant,
         tagBuildFileProvider: Provider<RegularFile>
     ) {
-        val capitalizedBuildVariant = buildVariant.capitalized()
-        tasks.register(
+        val capitalizedBuildVariant = buildVariant.capitalizedName()
+        register(
             "$PRINT_LAST_INCREASED_TAG_TASK_PREFIX$capitalizedBuildVariant",
             PrintLastIncreasedTag::class.java
         ) { task ->
@@ -150,29 +174,19 @@ abstract class BuildPublishPlugin : Plugin<Project> {
         }
     }
 
-    private fun TaskContainer.registerAppDistributionPublishTask(
-        buildVariant: BuildVariant
-    ) {
-        val capitalizedBuildVariant = buildVariant.capitalized()
-        register("$BUILD_PUBLISH_TASK_PREFIX$capitalizedBuildVariant") {
-            it.dependsOn("$DISTRIBUTION_UPLOAD_TASK_PREFIX$capitalizedBuildVariant")
-            it.finalizedBy("$SEND_CHANGELOG_TASK_PREFIX$capitalizedBuildVariant")
-        }
-    }
-
     private fun TaskContainer.registerGenerateChangelogTask(
         buildPublishExtension: BuildPublishExtension,
         buildVariant: BuildVariant,
         changelogFile: File,
         tagBuildFileProvider: Provider<RegularFile>
     ): Provider<GenerateChangelogTask> {
-        val capitalizedBuildVariant = buildVariant.capitalized()
+        val capitalizedBuildVariant = buildVariant.capitalizedName()
         return register(
             "$GENERATE_CHANGELOG_TASK_PREFIX$capitalizedBuildVariant",
             GenerateChangelogTask::class.java
         ) {
             it.commitMessageKey.set(buildPublishExtension.commitMessageKey)
-            it.buildVariant.set(buildVariant.name)
+            it.buildVariant.set(buildVariant.capitalizedName())
             it.changelogFile.set(changelogFile)
             it.tagBuildFile.set(tagBuildFileProvider)
         }
@@ -184,7 +198,7 @@ abstract class BuildPublishPlugin : Plugin<Project> {
         changelogFileProvider: Provider<RegularFile>,
         tagBuildFileProvider: Provider<RegularFile>,
     ) {
-        val capitalizedBuildVariant = buildVariant.capitalized()
+        val capitalizedBuildVariant = buildVariant.capitalizedName()
         register(
             "$SEND_CHANGELOG_TASK_PREFIX$capitalizedBuildVariant",
             SendChangelogTask::class.java
@@ -202,24 +216,20 @@ abstract class BuildPublishPlugin : Plugin<Project> {
     }
 
     private fun TaskContainer.registerAppCenterDistributionTask(
-        buildVariant: String,
-        buildVariants: Set<String>,
         buildPublishExtension: BuildPublishExtension,
-        project: Project,
-    ) {
-        register(
-            "$APP_CENTER_DISTRIBUTION_UPLOAD_TASK_PREFIX${buildVariant.capitalize()}",
+        buildVariant: BuildVariant,
+        changelogFileProvider: Provider<RegularFile>,
+        outputFile: File,
+    ): TaskProvider<AppCenterDistributionTask>? {
+        return register(
+            "$APP_CENTER_DISTRIBUTION_UPLOAD_TASK_PREFIX${buildVariant.capitalizedName()}",
             AppCenterDistributionTask::class.java,
         ) {
-            val commandExecutor = LinuxShellCommandExecutor(project)
-            val commitMessageKey = buildPublishExtension.commitMessageKey.get()
-            val releaseNotes = buildChangelog(project, commandExecutor, commitMessageKey, buildVariants)
             it.config.set(buildPublishExtension.appCenterConfig)
-            it.baseOutputFileName.set(buildPublishExtension.baseOutputFileName)
             it.currentBuildVariant.set(buildVariant)
-            it.buildVariants.set(buildVariants)
             it.distributionGroups.set(buildPublishExtension.appCenterDistributionGroups)
-            it.releaseNotes.set(releaseNotes)
+            it.outputFile.set(outputFile)
+            it.changelogFile.set(changelogFileProvider)
         }
     }
 }

@@ -1,17 +1,29 @@
 package ru.kode.android.build.publish.plugin.task
 
 import com.squareup.moshi.Moshi
-import okhttp3.*
+import okhttp3.Interceptor
+import okhttp3.OkHttpClient
+import okhttp3.logging.HttpLoggingInterceptor
+import org.gradle.api.logging.Logger
+import retrofit2.Call
+import retrofit2.Response
+import retrofit2.Retrofit
+import retrofit2.converter.moshi.MoshiConverterFactory
+import ru.kode.android.build.publish.plugin.task.api.AppCenterApi
+import ru.kode.android.build.publish.plugin.task.api.AppCenterUploadApi
 import ru.kode.android.build.publish.plugin.task.entity.ChunkRequestBody
+import ru.kode.android.build.publish.plugin.task.entity.CommitRequest
+import ru.kode.android.build.publish.plugin.task.entity.DistributeRequest
 import ru.kode.android.build.publish.plugin.task.entity.GetUploadResponse
 import ru.kode.android.build.publish.plugin.task.entity.PrepareResponse
-import ru.kode.android.build.publish.plugin.task.entity.SentMetaDataResponse
+import ru.kode.android.build.publish.plugin.task.entity.SendMetaDataResponse
 import java.io.File
 import java.util.concurrent.TimeUnit
 
 internal class AppCenterUploader(
     private val ownerName: String,
     private val appName: String,
+    logger: Logger,
     token: String,
 ) {
 
@@ -20,33 +32,56 @@ internal class AppCenterUploader(
         .readTimeout(HTTP_CONNECT_TIMEOUT_SEC, TimeUnit.SECONDS)
         .writeTimeout(HTTP_CONNECT_TIMEOUT_SEC, TimeUnit.SECONDS)
         .addInterceptor(AttachTokenInterceptor(token))
+        .apply {
+            val loggingInterceptor = HttpLoggingInterceptor { message -> logger.debug(message) }
+            loggingInterceptor.level = HttpLoggingInterceptor.Level.BODY
+            addNetworkInterceptor(loggingInterceptor)
+        }
         .build()
 
     private val moshi = Moshi.Builder().build()
 
+    private inline fun <reified T> createApi(baseUrl: String): T {
+        return Retrofit.Builder()
+            .baseUrl(baseUrl)
+            .client(client)
+            .addConverterFactory(MoshiConverterFactory.create(moshi))
+            .build()
+            .create(T::class.java)
+    }
+
+    private val api = createApi<AppCenterApi>("https://api.appcenter.ms/v0.1/")
+
+    private var _uploadApi: AppCenterUploadApi? = null
+
+    private val uploadApi: AppCenterUploadApi
+        get() {
+            return _uploadApi ?: error("upload api is not initialized")
+        }
+
+    fun iniUploadApi(uploadDomain: String) {
+        _uploadApi = createApi<AppCenterUploadApi>(uploadDomain)
+    }
+
     fun prepareRelease(): PrepareResponse {
-        val url = "https://api.appcenter.ms/v0.1/apps/${ownerName}/${appName}/uploads/releases"
-        val adapter = moshi.adapter(PrepareResponse::class.java)
-        val body = post(url) ?: error("body is null")
-        return adapter.fromJson(body.string()).required(body)
+        return api.prepareRelease(ownerName, appName).executeOrThrow()
     }
 
     fun sendMetaData(
         apkFile: File,
         packageAssetId: String,
         encodedToken: String,
-    ): SentMetaDataResponse {
-        val appType = "application/vnd.android.package-archive"
-        val url = "https://file.appcenter.ms/upload/set_metadata/$packageAssetId" +
-            "?file_name=${apkFile.name}" +
-            "&file_size=${apkFile.length()}" +
-            "&token=$encodedToken" +
-            "&content_type=$appType"
-        val adapter = moshi.adapter(SentMetaDataResponse::class.java)
-        val body = post(url) ?: error("body is null")
-        val response = adapter.fromJson(body.string()).required(body)
+    ): SendMetaDataResponse {
+        val contentType = "application/vnd.android.package-archive"
+        val response = uploadApi.sendMetaData(
+            packageAssetId = packageAssetId,
+            fileName = apkFile.name,
+            fileSize = apkFile.length(),
+            encodedToken = encodedToken,
+            contentType = contentType,
+        ).executeOrThrow()
         if (response.status_code != "Success") {
-            error("send meta data terminated with ${response.status_code}")
+            throw AppCenterException("send meta data terminated with ${response.status_code}")
         }
         return response
     }
@@ -57,30 +92,20 @@ internal class AppCenterUploader(
         chunkNumber: Int,
         request: ChunkRequestBody,
     ) {
-        val url = "https://file.appcenter.ms/upload/upload_chunk/$packageAssetId" +
-            "?token=$encodedToken" +
-            "&block_number=$chunkNumber"
-        post(url, request)
+        return uploadApi.uploadChunk(packageAssetId, encodedToken, chunkNumber, request)
+            .executeOrThrow()
     }
 
     fun sendUploadIsFinished(
         packageAssetId: String,
         encodedToken: String,
     ) {
-        val url = "https://file.appcenter.ms/upload/finished/$packageAssetId?token=$encodedToken"
-        post(url)
+        uploadApi.sendUploadIsFinished(packageAssetId, encodedToken).executeOrThrow()
     }
 
     fun commit(preparedUploadId: String) {
-        val url = "https://api.appcenter.ms/v0.1/apps/" +
-            "$ownerName/$appName/uploads/releases/$preparedUploadId"
-
-        val body = FormBody.Builder()
-            .addEncoded("upload_status", "uploadFinished")
-            .addEncoded("id", preparedUploadId)
-            .build()
-
-        patch(url, body)
+        api.commit(ownerName, appName, preparedUploadId, CommitRequest(preparedUploadId))
+            .executeOrThrow()
     }
 
     fun waitingReadyToBePublished(preparedUploadId: String): GetUploadResponse {
@@ -95,79 +120,50 @@ internal class AppCenterUploader(
         return response
     }
 
+    private fun getUpload(preparedUploadId: String): GetUploadResponse {
+        return api.getUpload(ownerName, appName, preparedUploadId).executeOrThrow()
+    }
+
     fun distribute(
         releaseId: String,
         distributionGroups: Set<String>,
         releaseNotes: String,
     ) {
-        val url = "https://api.appcenter.ms/v0.1/apps/$ownerName/$appName/releases/$releaseId"
-        val destinations = distributionGroups.map { "{ \"name\" : $it }" }.toString()
-
-        val body = FormBody.Builder()
-            .addEncoded("upload_status", "uploadFinished")
-            .addEncoded("destinations", destinations)
-            .addEncoded("release_notes", releaseNotes)
-            .addEncoded("notify_testers", "true")
-            .build()
-
-        patch(url, body)
+        val request = DistributeRequest(
+            destinations = distributionGroups.map { DistributeRequest.Destination(it) },
+            release_notes = releaseNotes,
+        )
+        api.distribute(ownerName, appName, releaseId, request).executeOrThrow()
     }
-
-    private fun getUpload(preparedUploadId: String): GetUploadResponse {
-        val url = "https://api.appcenter.ms/v0.1/apps/" +
-            "$ownerName/$appName/uploads/releases/$preparedUploadId"
-        val body = get(url) ?: error("body is null")
-        val adapter = moshi.adapter(GetUploadResponse::class.java)
-        return adapter.fromJson(body.string()).required(body)
-    }
-
-    private fun get(url: String): ResponseBody? {
-        val request = Request
-            .Builder()
-            .get()
-            .url(url)
-            .build()
-
-        return client.newCall(request).execute().body
-    }
-
-    private fun post(url: String, body: RequestBody = FormBody.Builder().build()): ResponseBody? {
-        val request = Request
-            .Builder()
-            .post(body)
-            .url(url)
-            .build()
-
-        return client.newCall(request).execute().body
-    }
-
-    private fun patch(url: String, body: RequestBody = FormBody.Builder().build()): ResponseBody? {
-        val request = Request
-            .Builder()
-            .patch(body)
-            .url(url)
-            .build()
-
-        return client.newCall(request).execute().body
-    }
-}
-
-private fun <T> T?.required(body: ResponseBody): T {
-    return this ?: error("cannot parse json body ${body.string()}")
 }
 
 private class AttachTokenInterceptor(
     private val token: String,
 ) : Interceptor {
-    override fun intercept(chain: Interceptor.Chain): Response {
+    override fun intercept(chain: Interceptor.Chain): okhttp3.Response {
         val originalRequest = chain.request()
         val newRequest = originalRequest.newBuilder()
-            .addHeader(name = "Content-Type", "application/json; charset=UTF-8")
-            .addHeader("Accept", "application/json; charset=UTF-8")
+            .addHeader(name = "Content-Type", "application/json")
+            .addHeader("Accept", "application/json")
             .addHeader(name = "X-API-Token", token)
             .build()
         return chain.proceed(newRequest)
     }
 }
 
-private const val HTTP_CONNECT_TIMEOUT_SEC = 10L
+private fun <T> Call<T>.executeOrThrow() = execute().bodyOrThrow()
+
+private fun <T> Response<T>.bodyOrThrow() = successOrThrow()!!
+
+private fun <T> Response<T>.successOrThrow() =
+    if (isSuccessful) {
+        body()
+    } else {
+        throw AppCenterException(
+            "App center upload error, code=${code()}, reason=${errorBody()?.string()}",
+        )
+    }
+
+internal class AppCenterException(override val message: String) : Throwable(message)
+
+private const val HTTP_CONNECT_TIMEOUT_SEC = 60L

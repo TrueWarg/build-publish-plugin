@@ -1,17 +1,21 @@
 package ru.kode.android.build.publish.plugin.task
 
 import org.gradle.api.DefaultTask
+import org.gradle.api.file.RegularFileProperty
 import org.gradle.api.plugins.BasePlugin
 import org.gradle.api.provider.MapProperty
 import org.gradle.api.provider.Property
 import org.gradle.api.provider.SetProperty
 import org.gradle.api.tasks.Input
+import org.gradle.api.tasks.InputFile
 import org.gradle.api.tasks.TaskAction
 import org.gradle.api.tasks.options.Option
+import ru.kode.android.build.publish.plugin.enity.BuildVariant
 import ru.kode.android.build.publish.plugin.error.ValueNotFoundException
 import ru.kode.android.build.publish.plugin.task.entity.ChunkRequestBody
-import ru.kode.android.build.publish.plugin.util.capitalize
+import ru.kode.android.build.publish.plugin.util.capitalizedName
 import java.io.File
+import java.io.IOException
 
 abstract class AppCenterDistributionTask : DefaultTask() {
     init {
@@ -28,32 +32,28 @@ abstract class AppCenterDistributionTask : DefaultTask() {
 
     @get:Input
     @get:Option(
-        option = "baseOutputFileName",
-        description = "Application bundle name for changelog"
-    )
-    abstract val baseOutputFileName: Property<String>
-
-    @get:Input
-    @get:Option(
         option = "currentBuildVariant",
         description = "Project current build variant"
     )
-    abstract val currentBuildVariant: Property<String>
+    abstract val currentBuildVariant: Property<BuildVariant>
 
-    @get:Input
-    @get:Option(option = "buildVariants", description = "List of all available build variants")
-    abstract val buildVariants: SetProperty<String>
+    @get:InputFile
+    @get:Option(
+        option = "outputFile",
+        description = "Artifact output file (absolute path is expected)"
+    )
+    abstract val outputFile: RegularFileProperty
 
     @get:Input
     @get:Option(option = "distributionGroups", description = "distribution group names")
     abstract val distributionGroups: SetProperty<String>
 
-    @get:Input
+    @get:InputFile
     @get:Option(
         option = "releaseNotes",
         description = "Release notes"
     )
-    abstract val releaseNotes: Property<String>
+    abstract val changelogFile: RegularFileProperty
 
     @TaskAction
     fun upload() {
@@ -62,17 +62,18 @@ abstract class AppCenterDistributionTask : DefaultTask() {
         val buildVariant = currentBuildVariant.get()
         val ownerName = config["owner_name"] ?: throw ValueNotFoundException("owner_name")
         val appName = (config["app_name"] ?: throw ValueNotFoundException("app_name")) +
-            "-${buildVariant.capitalize()}"
+            "-${buildVariant.capitalizedName()}"
+
         val apiTokenFilePath = config["api_token_file_path"]
             ?: throw ValueNotFoundException("api_token_file_path")
 
         val token = File(apiTokenFilePath).readText()
-        val uploader = AppCenterUploader(ownerName, appName, token)
+        val uploader = AppCenterUploader(ownerName, appName, project.logger, token)
         val prepareResponse = uploader.prepareRelease()
+        uploader.iniUploadApi(prepareResponse.upload_domain ?: "https://file.appcenter.ms")
 
         project.logger.debug("Step 2/7: Send metadata")
-        val apkDir = "${project.rootDir.path}/app/build/outputs/apk/${buildVariant}"
-        val apkFile = getLatestApk(apkDir) ?: error("no apk in $apkDir")
+        val apkFile = outputFile.get().asFile
         val packageAssetId = prepareResponse.package_asset_id
         val encodedToken = prepareResponse.url_encoded_token
         val metaResponse = uploader.sendMetaData(apkFile, packageAssetId, encodedToken)
@@ -98,29 +99,21 @@ abstract class AppCenterDistributionTask : DefaultTask() {
 
         project.logger.debug("Step 6/7: Fetching for release to be ready to publish")
         val publishResponse = uploader.waitingReadyToBePublished(prepareResponse.id)
-
         project.logger.debug("Step 7/7: Distribute to the app testers: $distributionGroups")
-        uploader.distribute(publishResponse.id, distributionGroups.get(), releaseNotes.get())
+        val releaseId = publishResponse.release_distinct_id
+        val releaseNotes = try {
+            changelogFile.get().asFile.readText()
+        } catch (e: IOException) {
+            project.logger.debug("failed to read changelog $e"); null
+        }
+        if (releaseId != null) {
+            uploader.distribute(releaseId, distributionGroups.get(), releaseNotes.orEmpty())
+        } else {
+            project.logger.error("Apk was uploaded, " +
+                "but distributors will not be notified: " +
+                "field 'release_distinct_id' is null, cannot execute 'distribute' request")
+        }
         project.logger.debug("Done")
     }
 }
 
-private fun getLatestApk(dirPath: String): File? {
-    val dir = File(dirPath)
-    val files = dir.listFiles()
-    if (files == null || files.isEmpty()) return null
-
-    var lastModifiedApk: File? = null
-    for (i in 1 until files.size) {
-        val foundFirstApk = lastModifiedApk == null && files[i].extension == "apk"
-        val foundNewerApk = lastModifiedApk != null
-            && (lastModifiedApk.lastModified() < files[i].lastModified())
-            && files[i].extension == "apk"
-
-        if (foundFirstApk || foundNewerApk) {
-            lastModifiedApk = files[i]
-        }
-    }
-
-    return lastModifiedApk
-}

@@ -1,4 +1,4 @@
-package ru.kode.android.example
+package ru.kode.android.example.flavors
 
 import android.os.Bundle
 import androidx.appcompat.app.AppCompatActivity
